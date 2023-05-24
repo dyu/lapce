@@ -100,6 +100,17 @@ pub struct LapceTab {
     mouse_pos: Point,
 }
 
+fn workspace_title(workspace: &LapceWorkspace) -> Option<String> {
+    let p = workspace.path.as_ref()?;
+    let dir = p.file_name().unwrap_or(p.as_os_str()).to_string_lossy();
+    Some(match &workspace.kind {
+        LapceWorkspaceType::Local => format!("{dir}"),
+        LapceWorkspaceType::RemoteSSH(ssh) => format!("{dir} [{ssh}]"),
+        #[cfg(windows)]
+        LapceWorkspaceType::RemoteWSL => format!("{dir} [wsl]"),
+    })
+}
+
 impl LapceTab {
     pub fn new(data: &mut LapceTabData) -> Self {
         let title = WidgetPod::new(Title::new(data).boxed());
@@ -621,6 +632,10 @@ impl LapceTab {
         _env: &Env,
     ) {
         match event {
+            Event::MouseMove(mouse) => {
+                Arc::make_mut(&mut data.rename).mouse_within = data.rename.active
+                    && self.rename.layout_rect().contains(mouse.pos);
+            }
             Event::MouseDown(mouse) => {
                 if !ctx.is_handled() && mouse.button.is_left() {
                     if let Some(position) = self.bar_hit_test(mouse.pos) {
@@ -794,20 +809,20 @@ impl LapceTab {
                             Arc::make_mut(doc).reload(Rope::from(pattern), true);
                         }
                     }
-                    LapceUICommand::UpdateSearchWithCaseSensitivity {
-                        pattern,
-                        case_sensitive,
-                    } => {
+                    LapceUICommand::UpdateSearch(pattern, new_cs) => {
                         if pattern.is_empty() {
                             Arc::make_mut(&mut data.find).unset();
                             Arc::make_mut(&mut data.search).matches =
                                 Arc::new(Default::default());
                         } else {
                             let find = Arc::make_mut(&mut data.find);
-                            find.set_case_sensitive(*case_sensitive);
+                            if let Some(cs) = new_cs {
+                                find.set_case_sensitive(*cs);
+                            }
                             find.set_find(pattern, false, false);
                             find.visual = true;
                             if data.focus_area == FocusArea::Panel(PanelKind::Search)
+                                && data.config.editor.move_focus_while_search
                             {
                                 if let Some(widget_id) = *data.main_split.active {
                                     ctx.submit_command(Command::new(
@@ -848,17 +863,6 @@ impl LapceTab {
                             )
                         }
                     }
-                    LapceUICommand::UpdateSearch(pattern) => {
-                        let case_sensitive = data.find.case_sensitive();
-                        ctx.submit_command(Command::new(
-                            LAPCE_UI_COMMAND,
-                            LapceUICommand::UpdateSearchWithCaseSensitivity {
-                                pattern: pattern.clone(),
-                                case_sensitive,
-                            },
-                            Target::Widget(self.id),
-                        ))
-                    }
                     LapceUICommand::OpenPluginInfo(volt) => {
                         data.main_split.open_plugin_info(ctx, volt);
                     }
@@ -880,7 +884,11 @@ impl LapceTab {
                     } => {
                         let doc = data.main_split.open_docs.get_mut(path).unwrap();
                         let doc = Arc::make_mut(doc);
-                        doc.load_history(version, content.clone());
+                        doc.load_history(
+                            version,
+                            content.clone(),
+                            data.config.editor.diff_context_lines,
+                        );
                         ctx.set_handled();
                     }
                     LapceUICommand::PrepareRename {
@@ -1734,27 +1742,11 @@ impl LapceTab {
                         ctx.set_handled();
                     }
                     LapceUICommand::Focus => {
-                        let dir = data
-                            .workspace
-                            .path
-                            .as_ref()
-                            .map(|p| {
-                                let dir = p
-                                    .file_name()
-                                    .unwrap_or(p.as_os_str())
-                                    .to_string_lossy();
-                                match &data.workspace.kind {
-                                    LapceWorkspaceType::Local => dir.to_string(),
-                                    LapceWorkspaceType::RemoteSSH(ssh) => {
-                                        format!("{} [{ssh}]", dir)
-                                    }
-                                    LapceWorkspaceType::RemoteWSL => {
-                                        format!("{dir} [wsl]")
-                                    }
-                                }
-                            })
-                            .unwrap_or_else(|| "Lapce".to_string());
-                        ctx.window().set_title(&dir);
+                        ctx.window().set_title(
+                            &workspace_title(&data.workspace)
+                                .map(|x| format!("{x} - Lapce"))
+                                .unwrap_or_else(|| String::from("Lapce")),
+                        );
                         ctx.submit_command(Command::new(
                             LAPCE_UI_COMMAND,
                             LapceUICommand::Focus,
@@ -1815,6 +1807,7 @@ impl LapceTab {
                         rev,
                         history,
                         changes,
+                        diff_context_lines,
                         ..
                     } => {
                         ctx.set_handled();
@@ -1823,6 +1816,7 @@ impl LapceTab {
                             *rev,
                             history,
                             changes.clone(),
+                            *diff_context_lines,
                         );
                     }
                     LapceUICommand::UpdateHistoryStyle {
@@ -1906,6 +1900,41 @@ impl LapceTab {
                         );
                         ctx.set_handled();
                     }
+                    LapceUICommand::DuplicateFileOpen {
+                        existing_path,
+                        new_path,
+                    } => {
+                        let new_path_clone = new_path.clone();
+                        let event_sink = ctx.get_external_handle();
+                        let tab_id = data.id;
+                        let explorer = data.file_explorer.clone();
+                        data.proxy.proxy_rpc.duplicate_path(
+                            existing_path.clone(),
+                            new_path.clone(),
+                            Box::new(move |res| {
+                                match res {
+                                    Ok(_) => {
+                                        let _ = event_sink.submit_command(
+                                            LAPCE_UI_COMMAND,
+                                            LapceUICommand::OpenFile(
+                                                new_path_clone,
+                                                false,
+                                            ),
+                                            Target::Widget(tab_id),
+                                        );
+                                    }
+                                    Err(err) => {
+                                        // TODO: Inform the user through a corner-notif
+                                        log::warn!(
+                                            "Failed to duplicate file: {:?}",
+                                            err,
+                                        );
+                                    }
+                                }
+                                explorer.reload();
+                            }),
+                        );
+                    }
                     LapceUICommand::RenamePath { from, to } => {
                         let explorer = data.file_explorer.clone();
                         data.proxy.proxy_rpc.rename_path(
@@ -1948,6 +1977,23 @@ impl LapceTab {
                             *indent_level,
                             *is_dir,
                             base_path.clone(),
+                        );
+                        ctx.set_handled();
+                    }
+                    LapceUICommand::ExplorerStartDuplicate {
+                        list_index,
+                        indent_level,
+                        base_path,
+                        name,
+                    } => {
+                        let file_explorer = Arc::make_mut(&mut data.file_explorer);
+                        file_explorer.start_duplicating(
+                            ctx,
+                            &mut data.main_split,
+                            *list_index,
+                            *indent_level,
+                            base_path.clone(),
+                            name.clone(),
                         );
                         ctx.set_handled();
                     }
@@ -1997,6 +2043,11 @@ impl LapceTab {
                     LapceUICommand::RunCommand(cmd, args) => {
                         ctx.set_handled();
                         let _ = process::Command::new(cmd).args(args).spawn();
+                    }
+                    LapceUICommand::ImageLoaded { url, image } => {
+                        ctx.set_handled();
+                        let images = Arc::make_mut(&mut data.images);
+                        images.load_finished(url, image)
                     }
                     _ => (),
                 }
@@ -2802,7 +2853,7 @@ impl Widget<LapceTabData> for LapceTabHeader {
         let tab_rect = ctx.size().to_rect();
 
         if ctx.is_hot() || self.drag_start.is_some() {
-            // Currenlty, we only paint background for the hot tab to prevent showing
+            // Currently, we only paint background for the hot tab to prevent showing
             // overlapped content on drag. In the future, we might want to:
             // - introduce a tab background color
             // - introduce a hover color
@@ -2833,26 +2884,12 @@ impl Widget<LapceTabData> for LapceTabHeader {
             1.0,
         );
 
-        let dir = data
-            .workspace
-            .path
-            .as_ref()
-            .map(|p| {
-                let dir = p.file_name().unwrap_or(p.as_os_str()).to_string_lossy();
-                match &data.workspace.kind {
-                    LapceWorkspaceType::Local => dir.to_string(),
-                    LapceWorkspaceType::RemoteSSH(ssh) => {
-                        format!("{} [{ssh}]", dir)
-                    }
-                    LapceWorkspaceType::RemoteWSL => {
-                        format!("{dir} [wsl]")
-                    }
-                }
-            })
-            .unwrap_or_else(|| "Lapce".to_string());
         let text_layout = ctx
             .text()
-            .new_text_layout(dir)
+            .new_text_layout(
+                workspace_title(&data.workspace)
+                    .unwrap_or_else(|| String::from("Lapce")),
+            )
             .font(
                 data.config.ui.font_family(),
                 data.config.ui.font_size() as f64,

@@ -2,9 +2,26 @@
 
 ## Unreleased
 
+### Features/Changes
+
+- [#1964](https://github.com/lapce/lapce/pull/1964): Add option to open files at line/column
+
+### Bug Fixes
+
+## 0.2.7
+
+### Features/Changes
+
+### Bug Fixes
+- [#2209](https://github.com/lapce/lapce/pull/2209): Fix macOS crashes
+- [#2228](https://github.com/lapce/lapce/pull/2228): Fix `.desktop` entry to properly associate with Lapce on Wayland
+
+## 0.2.6
+
 ### Breaking changes
 
 - [#1820](https://github.com/lapce/lapce/pull/1820): Add remote svg icon colour to theme, disable plugin settings when none are available
+- [#1988](https://github.com/lapce/lapce/pull/1987): Replace modal status background with background/foreground theme keys
 
 ### Features/Changes
 - [#1899](https://github.com/lapce/lapce/pull/1899): Improve sorting files with numbers
@@ -14,10 +31,31 @@
 - [#1856](https://github.com/lapce/lapce/pull/1856): Highlight git/VCS modified files in explorer, palette, and buffer tabs
 - [#1574](https://github.com/lapce/lapce/pull/1574): Panel sections can be expanded/collapsed
 - [#1938](https://github.com/lapce/lapce/pull/1938): Use dropdown for theme selection in settings
+- [#1960](https://github.com/lapce/lapce/pull/1960): Add sticky headers and code lens for PHP
+- [#1968](https://github.com/lapce/lapce/pull/1968): Completion lens (disabled by default)
+  - ![image](https://user-images.githubusercontent.com/13157904/211959283-c3229cfc-28d7-4676-a50d-aec7d47cde9f.png)
+- [#1972](https://github.com/lapce/lapce/pull/1972): Add file duplication option in fs tree context menu
+- [#1991](https://github.com/lapce/lapce/pull/1991): Implement rendering of images in markdown views
+- [#2004](https://github.com/lapce/lapce/pull/2004): Add ToggleHistory command
+- [#2033](https://github.com/lapce/lapce/pull/2033): Add setting for double click delay (Currently only works for opening file from the explorer)
+- [#2045](https://github.com/lapce/lapce/pull/2045): Add 'Rename Symbol' option on right-click
+- [#2071](https://github.com/lapce/lapce/pull/2071): Add command and keybinds to delete line
+- [#2073](https://github.com/lapce/lapce/pull/2073): Add Ctrl+{a,e,k} keybinds on macOS
+- [#2128](https://github.com/lapce/lapce/pull/2128): Add Lapce app icon to logo collection
+- [#2127](https://github.com/lapce/lapce/pull/2127): Extended double-click options with file-only and file + folders mode
+- [#1944](https://github.com/lapce/lapce/pull/1944): Add filter input in git branch selection
+  - ![image](https://user-images.githubusercontent.com/4404609/211232461-293e3b31-4e17-457e-825c-3018699a6fc2.png)
 
 ### Bug Fixes
 - [#1911](https://github.com/lapce/lapce/pull/1911): Fix movement on selections with left/right arrow keys
 - [#1939](https://github.com/lapce/lapce/pull/1939): Fix saving/editing newly saved-as files
+- [#1971](https://github.com/lapce/lapce/pull/1971): Fix up/down movement on first/last line
+- [#2036](https://github.com/lapce/lapce/pull/2036): Fix movement on selections with up/down arrow keys
+- [#2056](https://github.com/lapce/lapce/pull/2056): Fix default directory of remote session file picker
+- [#2072](https://github.com/lapce/lapce/pull/2072): Fix connection issues from Windows to lapce proxy
+- [#2069](https://github.com/lapce/lapce/pull/2045): Fix not finding git repositories in parent path
+- [#2131](https://github.com/lapce/lapce/pull/2131): Fix overwriting symlink
+- [#2188](https://github.com/lapce/lapce/pull/2188): Fix auto closing matching pairs in inappropriate inputs
 
 ## 0.2.5
 

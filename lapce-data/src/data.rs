@@ -31,6 +31,7 @@ use lapce_core::{
     register::Register,
     selection::Selection,
 };
+use lapce_proxy::cli::PathObject;
 use lapce_rpc::{
     buffer::BufferId,
     core::{CoreMessage, CoreNotification},
@@ -65,6 +66,7 @@ use crate::{
     explorer::FileExplorerData,
     find::Find,
     hover::HoverData,
+    images::ImageCache,
     keypress::KeyPressData,
     palette::{PaletteData, PaletteType, PaletteViewData},
     panel::{
@@ -117,7 +119,7 @@ impl LapceData {
     /// previously written to the Lapce database.
     pub fn load(
         event_sink: ExtEventSink,
-        paths: Vec<PathBuf>,
+        paths: Vec<PathObject>,
         log_file: Option<PathBuf>,
     ) -> Self {
         let _ = lapce_proxy::register_lapce_path();
@@ -132,15 +134,20 @@ impl LapceData {
             .unwrap_or_else(|_| Self::default_panel_orders());
         let latest_release = Arc::new(None);
 
-        let dirs: Vec<&PathBuf> = paths.iter().filter(|p| p.is_dir()).collect();
-        let files: Vec<&PathBuf> = paths.iter().filter(|p| p.is_file()).collect();
+        let pwd = std::env::current_dir().unwrap_or_default();
+
+        // Split user input into known existing directors and
+        // file paths that exist or not
+        let (dirs, files): (Vec<&PathObject>, Vec<&PathObject>) =
+            paths.iter().partition(|p| p.path.is_dir());
+
         if !dirs.is_empty() {
             let (size, mut pos) = db
                 .get_last_window_info()
                 .map(|i| (i.size, i.pos))
                 .unwrap_or_else(|_| (Size::new(800.0, 600.0), Point::new(0.0, 0.0)));
             for dir in dirs {
-                #[cfg(target_os = "windows")]
+                #[cfg(windows)]
                 let workspace_type =
                     if !env::var("WSL_DISTRO_NAME").unwrap_or_default().is_empty()
                         || !env::var("WSL_INTEROP").unwrap_or_default().is_empty()
@@ -150,7 +157,7 @@ impl LapceData {
                         LapceWorkspaceType::Local
                     };
 
-                #[cfg(not(target_os = "windows"))]
+                #[cfg(not(windows))]
                 let workspace_type = LapceWorkspaceType::Local;
 
                 let info = WindowInfo {
@@ -161,7 +168,7 @@ impl LapceData {
                         active_tab: 0,
                         workspaces: vec![LapceWorkspace {
                             kind: workspace_type,
-                            path: Some(dir.to_path_buf()),
+                            path: Some(dir.path.to_owned()),
                             last_open: 0,
                         }],
                     },
@@ -227,13 +234,46 @@ impl LapceData {
             windows.insert(window.window_id, window);
         }
 
-        if let Some((window_id, _)) = windows.iter().next() {
+        if let Some((window_id, data)) = windows.iter().next() {
             for file in files {
-                let _ = event_sink.submit_command(
-                    LAPCE_UI_COMMAND,
-                    LapceUICommand::OpenFile(file.to_path_buf(), false),
-                    Target::Window(*window_id),
-                );
+                let file_path = match file.path.canonicalize() {
+                    Ok(v) => v,
+                    _ => pwd.join(&file.path),
+                };
+                for (widget_id, _) in &data.tabs {
+                    if let Some(pos) = file.linecol {
+                        // jump to line and column
+                        if let Err(err) = event_sink.submit_command(
+                            LAPCE_UI_COMMAND,
+                            LapceUICommand::JumpToLineColLocation(
+                                None,
+                                EditorLocation {
+                                    path: file_path.clone(),
+                                    position: Some(pos), // line info is included in column variable
+                                    scroll_offset: None,
+                                    history: None,
+                                },
+                                false,
+                            ),
+                            Target::Widget(*widget_id),
+                        ) {
+                            log::warn!("Failed to lauch: {err}");
+                        } else {
+                            break;
+                        };
+                    } else {
+                        // open the file
+                        if let Err(err) = event_sink.submit_command(
+                            LAPCE_UI_COMMAND,
+                            LapceUICommand::OpenFile(file_path.clone(), false),
+                            Target::Window(*window_id),
+                        ) {
+                            log::warn!("Failed to lauch: {err}");
+                        } else {
+                            break;
+                        };
+                    }
+                }
             }
         }
 
@@ -354,13 +394,39 @@ impl LapceData {
         Ok(())
     }
 
-    pub fn try_open_in_existing_process(paths: &[PathBuf]) -> Result<()> {
+    pub fn get_socket() -> Result<interprocess::local_socket::LocalSocketStream> {
         let local_socket = Directory::local_socket()
             .ok_or_else(|| anyhow!("can't get local socket folder"))?;
-        let mut socket =
+        let socket =
             interprocess::local_socket::LocalSocketStream::connect(local_socket)?;
-        let folders: Vec<_> = paths.iter().filter(|p| p.is_dir()).cloned().collect();
-        let files: Vec<_> = paths.iter().filter(|p| p.is_file()).cloned().collect();
+        Ok(socket)
+    }
+
+    pub fn try_open_in_existing_process(
+        mut socket: interprocess::local_socket::LocalSocketStream,
+        paths: &[PathObject],
+    ) -> Result<()> {
+        let folders: Vec<PathBuf> = paths
+            .iter()
+            .filter_map(|p| {
+                if p.path.is_dir() {
+                    Some(p.path.to_owned())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        let files = paths
+            .iter()
+            .filter_map(|p| {
+                if p.path.is_file() {
+                    Some(p.path.to_owned())
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<PathBuf>>();
         let msg: CoreMessage =
             RpcMessage::Notification(CoreNotification::OpenPaths {
                 window_tab_id: None,
@@ -644,6 +710,7 @@ pub struct LapceTabData {
     pub window_origin: Rc<RefCell<Point>>,
     pub panel: Arc<PanelData>,
     pub config: Arc<LapceConfig>,
+    pub images: Arc<ImageCache>,
     pub focus: Arc<WidgetId>,
     pub focus_area: FocusArea,
     #[data(ignore)]
@@ -803,6 +870,13 @@ impl LapceTabData {
             event_sink.clone(),
         );
         main_split.add_editor(
+            settings.filter_editor_id,
+            None,
+            LocalBufferKind::SettingsFilter,
+            &config,
+            event_sink.clone(),
+        );
+        main_split.add_editor(
             rename.view_id,
             None,
             LocalBufferKind::Rename,
@@ -868,6 +942,7 @@ impl LapceTabData {
             window_origin: Rc::new(RefCell::new(Point::ZERO)),
             panel: Arc::new(panel),
             config,
+            images: Arc::new(ImageCache::default()),
             focus_area: FocusArea::Editor,
             db,
             progresses: Arc::new(Vec::new()),
@@ -1365,20 +1440,32 @@ impl LapceTabData {
                 }
             }
             LapceWorkbenchCommand::RevealActiveFileInFileExplorer => {
-                let path = if let Some(editor) = self.main_split.active_editor() {
-                    match &editor.content {
-                        BufferContent::File(path) => path,
-                        _ => return,
-                    }
-                } else {
-                    return;
-                };
-
-                ctx.submit_command(Command::new(
-                    LAPCE_UI_COMMAND,
-                    LapceUICommand::RevealInFileExplorer(path.to_owned()),
-                    Target::Auto,
-                ))
+                if let Some(LapceEditorData {
+                    content: BufferContent::File(path),
+                    ..
+                }) = self.main_split.active_editor()
+                {
+                    ctx.submit_command(Command::new(
+                        LAPCE_UI_COMMAND,
+                        LapceUICommand::RevealInFileExplorer(path.to_owned()),
+                        Target::Auto,
+                    ));
+                }
+            }
+            LapceWorkbenchCommand::RevealActiveFileInFileTree => {
+                if let Some(LapceEditorData {
+                    content: BufferContent::File(path),
+                    ..
+                }) = self.main_split.active_editor()
+                {
+                    ctx.submit_command(Command::new(
+                        LAPCE_UI_COMMAND,
+                        LapceUICommand::ExplorerRevealPath {
+                            path: path.to_owned(),
+                        },
+                        Target::Widget(self.file_explorer.widget_id),
+                    ));
+                }
             }
             LapceWorkbenchCommand::EnableModal => {
                 let config = Arc::make_mut(&mut self.config);
@@ -1824,6 +1911,7 @@ impl LapceTabData {
                     Target::Widget(self.palette.widget_id),
                 ));
             }
+            #[cfg(windows)]
             LapceWorkbenchCommand::ConnectWsl => ctx.submit_command(Command::new(
                 LAPCE_UI_COMMAND,
                 LapceUICommand::SetWorkspace(LapceWorkspace {
@@ -3239,7 +3327,7 @@ impl LapceMainSplitData {
             .unwrap_or(0)
             + 1;
 
-        format!("{}{}", PREFIX, new_num)
+        format!("{PREFIX}{new_num}")
     }
 
     pub fn install_theme(&mut self, ctx: &mut EventCtx, _config: &LapceConfig) {
@@ -3345,11 +3433,33 @@ impl LapceMainSplitData {
 
         // Whether we're swapping to a different file/kind-of-buffer
         let new_buffer = match doc.content() {
-            BufferContent::File(path) => path != &location.path,
+            BufferContent::File(path) => {
+                if path != &location.path {
+                    // different path
+                    true
+                } else {
+                    // same path, then check history version and EditorView change
+                    let editor = self.editors.get(&editor_view_id).unwrap();
+                    if let EditorView::Diff(old_version) = editor.view.clone() {
+                        if let Some(new_version) = location.history.clone() {
+                            // old editor is DiffView, and OpenFileDiff with 'history version'
+                            // check history version
+                            new_version != old_version
+                        } else {
+                            // old editor is DiffView, but OpenFile without 'history version'
+                            true
+                        }
+                    } else {
+                        // old editor is NormalView, but OpenFileDiff with 'history version'
+                        location.history.is_some()
+                    }
+                }
+            }
             BufferContent::Local(_) => true,
             BufferContent::SettingsValue(..) => true,
             BufferContent::Scratch(..) => true,
         };
+
         if new_buffer {
             // Save the position in the document so that when the user reopens it, they'll
             // return to the same place
@@ -3386,7 +3496,7 @@ impl LapceMainSplitData {
 
             // Since we don't have document loaded, we'll have to retrieve it from the proxy
             // So, the document is not immediately filled with content!
-            doc.retrieve_file(vec![(editor_view_id, location)], None, cb);
+            doc.retrieve_file(vec![(editor_view_id, location)], None, cb, config);
             self.open_docs.insert(path.clone(), Arc::new(doc));
         } else {
             let doc = self.open_docs.get_mut(&path).unwrap().clone();
@@ -3420,7 +3530,8 @@ impl LapceMainSplitData {
                 let doc = self.open_docs.get_mut(&path).unwrap();
                 // TODO(minor): Could we avoid this make mut definitely cloning the `Document` by
                 // early-dropping our held doc above?
-                Arc::make_mut(doc).retrieve_history(version);
+                Arc::make_mut(doc)
+                    .retrieve_history(version, config.editor.diff_context_lines);
             }
 
             let editor = self.get_editor_or_new(
@@ -3598,7 +3709,7 @@ impl LapceMainSplitData {
                     .get(&path.to_str().unwrap().to_string())
                     .map(Rope::from);
                 Arc::make_mut(main_split_data.open_docs.get_mut(&path).unwrap())
-                    .retrieve_file(locations.clone(), unsaved_buffer, None);
+                    .retrieve_file(locations.clone(), unsaved_buffer, None, config);
             }
         } else {
             main_split_data.splits.insert(
@@ -4360,7 +4471,9 @@ pub struct SelectionHistory {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EditorView {
     Normal,
+    /// Source Control Diffing
     Diff(String),
+    /// Code Lens
     Lens,
 }
 
@@ -4547,7 +4660,7 @@ impl Display for SshHost {
         }
         write!(f, "{}", self.host)?;
         if let Some(port) = self.port {
-            write!(f, ":{}", port)?;
+            write!(f, ":{port}")?;
         }
         Ok(())
     }
@@ -4557,15 +4670,22 @@ impl Display for SshHost {
 pub enum LapceWorkspaceType {
     Local,
     RemoteSSH(SshHost),
+    #[cfg(windows)]
     RemoteWSL,
 }
 
 impl LapceWorkspaceType {
+    #[cfg(windows)]
     pub fn is_remote(&self) -> bool {
         matches!(
             self,
             LapceWorkspaceType::RemoteSSH(_) | LapceWorkspaceType::RemoteWSL
         )
+    }
+
+    #[cfg(not(windows))]
+    pub fn is_remote(&self) -> bool {
+        matches!(self, LapceWorkspaceType::RemoteSSH(_))
     }
 }
 
@@ -4576,6 +4696,7 @@ impl std::fmt::Display for LapceWorkspaceType {
             LapceWorkspaceType::RemoteSSH(ssh) => {
                 write!(f, "ssh://{ssh}")
             }
+            #[cfg(windows)]
             LapceWorkspaceType::RemoteWSL => f.write_str("WSL"),
         }
     }

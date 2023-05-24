@@ -1,46 +1,49 @@
+use crate::tab::LapceIcon;
 use druid::{
     piet::{Text, TextLayoutBuilder},
     BoxConstraints, Command, Env, Event, EventCtx, LayoutCtx, LifeCycle,
     LifeCycleCtx, MouseEvent, PaintCtx, Point, Rect, RenderContext, Size, Target,
-    UpdateCtx, Widget, WidgetExt, WidgetId, WidgetPod,
+    UpdateCtx, Widget, WidgetId,
 };
-use lapce_core::command::FocusCommand;
+use lapce_core::{buffer::DiffLines, command::FocusCommand};
 use lapce_data::{
     command::{CommandKind, LapceCommand, LAPCE_COMMAND},
     config::{LapceIcons, LapceTheme},
+    data::EditorView,
     data::LapceTabData,
 };
+use std::ops::Range;
 
-use crate::{editor::view::LapceEditorView, tab::LapceIcon};
-
-// Local search widget
-pub struct FindBox {
+// Diff tool box
+pub struct DiffBox {
     parent_view_id: WidgetId,
-    input_width: f64,
     result_width: f64,
-    input: WidgetPod<LapceTabData, Box<dyn Widget<LapceTabData>>>,
     icons: Vec<LapceIcon>,
     mouse_pos: Point,
 }
 
-impl FindBox {
-    pub fn new(
-        view_id: WidgetId,
-        editor_id: WidgetId,
-        parent_view_id: WidgetId,
-    ) -> Self {
-        let input = LapceEditorView::new(view_id, editor_id, None)
-            .hide_header()
-            .hide_gutter()
-            .padding((10.0, 5.0));
+impl DiffBox {
+    pub fn new(parent_view_id: WidgetId) -> Self {
         let icons = vec![
+            LapceIcon {
+                icon: LapceIcons::FILE,
+                rect: Rect::ZERO,
+                command: Command::new(
+                    LAPCE_COMMAND,
+                    LapceCommand {
+                        kind: CommandKind::Focus(FocusCommand::OpenSourceFile),
+                        data: None,
+                    },
+                    Target::Widget(parent_view_id),
+                ),
+            },
             LapceIcon {
                 icon: LapceIcons::SEARCH_BACKWARD,
                 rect: Rect::ZERO,
                 command: Command::new(
                     LAPCE_COMMAND,
                     LapceCommand {
-                        kind: CommandKind::Focus(FocusCommand::SearchBackward),
+                        kind: CommandKind::Focus(FocusCommand::PreviousDiff),
                         data: None,
                     },
                     Target::Widget(parent_view_id),
@@ -52,31 +55,7 @@ impl FindBox {
                 command: Command::new(
                     LAPCE_COMMAND,
                     LapceCommand {
-                        kind: CommandKind::Focus(FocusCommand::SearchForward),
-                        data: None,
-                    },
-                    Target::Widget(parent_view_id),
-                ),
-            },
-            LapceIcon {
-                icon: LapceIcons::SEARCH_CASE_SENSITIVE,
-                rect: Rect::ZERO,
-                command: Command::new(
-                    LAPCE_COMMAND,
-                    LapceCommand {
-                        kind: CommandKind::Focus(FocusCommand::ToggleCaseSensitive),
-                        data: None,
-                    },
-                    Target::Widget(parent_view_id),
-                ),
-            },
-            LapceIcon {
-                icon: LapceIcons::CLOSE,
-                rect: Rect::ZERO,
-                command: Command::new(
-                    LAPCE_COMMAND,
-                    LapceCommand {
-                        kind: CommandKind::Focus(FocusCommand::ClearSearch),
+                        kind: CommandKind::Focus(FocusCommand::NextDiff),
                         data: None,
                     },
                     Target::Widget(parent_view_id),
@@ -85,9 +64,7 @@ impl FindBox {
         ];
         Self {
             parent_view_id,
-            input_width: 200.0,
             result_width: 75.0,
-            input: WidgetPod::new(input.boxed()),
             icons,
             mouse_pos: Point::ZERO,
         }
@@ -111,15 +88,21 @@ impl FindBox {
     }
 }
 
-impl Widget<LapceTabData> for FindBox {
+impl Widget<LapceTabData> for DiffBox {
     fn event(
         &mut self,
         ctx: &mut EventCtx,
         event: &Event,
         data: &mut LapceTabData,
-        env: &Env,
+        _env: &Env,
     ) {
-        self.input.event(ctx, event, data, env);
+        let editor_data = data.editor_view_content(self.parent_view_id);
+        match &editor_data.editor.view {
+            EditorView::Diff(_) => {}
+            _ => {
+                return;
+            }
+        }
         match event {
             Event::MouseMove(mouse_event) => {
                 ctx.set_handled();
@@ -140,36 +123,19 @@ impl Widget<LapceTabData> for FindBox {
 
     fn layout(
         &mut self,
-        ctx: &mut LayoutCtx,
-        bc: &BoxConstraints,
-        data: &LapceTabData,
-        env: &Env,
+        _ctx: &mut LayoutCtx,
+        _bc: &BoxConstraints,
+        _data: &LapceTabData,
+        _env: &Env,
     ) -> Size {
-        let input_bc =
-            BoxConstraints::tight(Size::new(self.input_width, bc.max().height));
-        let mut input_size = self.input.layout(ctx, &input_bc, data, env);
-        self.input.set_origin(ctx, data, env, Point::ZERO);
         let icons_len = self.icons.len() as f64;
-        let height = input_size.height;
-        let mut width = input_size.width + self.result_width + height * icons_len;
-
-        if width - 20.0 > bc.max().width {
-            let input_bc = BoxConstraints::tight(Size::new(
-                bc.max().width - height * icons_len - 20.0 - self.result_width,
-                bc.max().height,
-            ));
-            input_size = self.input.layout(ctx, &input_bc, data, env);
-            self.input.set_origin(ctx, data, env, Point::ZERO);
-            width = input_size.width + self.result_width + height * icons_len;
-        }
+        let height = 35.0;
+        let width = self.result_width + height * icons_len;
 
         for (i, icon) in self.icons.iter_mut().enumerate() {
             icon.rect = Size::new(height, height)
                 .to_rect()
-                .with_origin(Point::new(
-                    input_size.width + self.result_width + i as f64 * height,
-                    0.0,
-                ))
+                .with_origin(Point::new(i as f64 * height, 0.0))
                 .inflate(-5.0, -5.0);
         }
 
@@ -178,30 +144,30 @@ impl Widget<LapceTabData> for FindBox {
 
     fn lifecycle(
         &mut self,
-        ctx: &mut LifeCycleCtx,
-        event: &LifeCycle,
-        data: &LapceTabData,
-        env: &Env,
+        _ctx: &mut LifeCycleCtx,
+        _event: &LifeCycle,
+        _data: &LapceTabData,
+        _env: &Env,
     ) {
-        self.input.lifecycle(ctx, event, data, env);
     }
 
     fn update(
         &mut self,
-        ctx: &mut UpdateCtx,
+        _ctx: &mut UpdateCtx,
         _old_data: &LapceTabData,
-        data: &LapceTabData,
-        env: &Env,
+        _data: &LapceTabData,
+        _env: &Env,
     ) {
-        self.input.update(ctx, data, env);
     }
 
-    fn paint(&mut self, ctx: &mut PaintCtx, data: &LapceTabData, env: &Env) {
-        if !data.find.visual {
-            return;
+    fn paint(&mut self, ctx: &mut PaintCtx, data: &LapceTabData, _env: &Env) {
+        let editor_data = data.editor_view_content(self.parent_view_id);
+        match &editor_data.editor.view {
+            EditorView::Diff(_) => {}
+            _ => {
+                return;
+            }
         }
-
-        let buffer = data.editor_view_content(self.parent_view_id);
 
         let rect = ctx.size().to_rect();
         ctx.with_save(|ctx| {
@@ -227,35 +193,75 @@ impl Widget<LapceTabData> for FindBox {
             data.config
                 .get_color_unchecked(LapceTheme::EDITOR_BACKGROUND),
         );
-        self.input.paint(ctx, data, env);
 
-        let mut index = None;
-        let cursor_offset = buffer.editor.cursor.offset();
-
-        for i in 0..buffer.doc.find.borrow().occurrences().regions().len() {
-            let region = buffer.doc.find.borrow().occurrences().regions()[i];
-            if region.min() <= cursor_offset && cursor_offset <= region.max() {
-                index = Some(i);
+        let mut diff_blocks = Vec::new();
+        // find all diff blocks, ignore Both and Skip
+        if let Some(history) = editor_data.doc.get_history("head") {
+            for (i, change) in history.changes().iter().enumerate() {
+                match change {
+                    DiffLines::Left(_) => {
+                        if let Some(next) = history.changes().get(i + 1) {
+                            match next {
+                                DiffLines::Right(_) => {}
+                                DiffLines::Left(_) => {}
+                                DiffLines::Both(_, r) => {
+                                    diff_blocks.push(Range {
+                                        start: r.start,
+                                        end: r.start,
+                                    });
+                                }
+                                DiffLines::Skip(_, r) => {
+                                    diff_blocks.push(Range {
+                                        start: r.start,
+                                        end: r.start,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                    DiffLines::Both(_, _) => {}
+                    DiffLines::Skip(_, _) => {}
+                    DiffLines::Right(r) => {
+                        diff_blocks.push(Range {
+                            start: r.start,
+                            end: r.start,
+                        });
+                    }
+                }
+            }
+        }
+        let mut index = 0;
+        let buffer = editor_data.doc.buffer();
+        let line = buffer.line_of_offset(editor_data.editor.cursor.offset());
+        let count = diff_blocks.len();
+        if count > 0 {
+            // find the block where the cursor in
+            let mut prev_end = 0;
+            for (i, block) in diff_blocks.iter().enumerate() {
+                if (i == 0 && line < block.start)
+                    || (i == count - 1 && line > block.end - 1)
+                    || (line >= block.start && line < block.end)
+                {
+                    index = i + 1;
+                    break;
+                }
+                if line < block.start {
+                    let half = (block.start + prev_end) / 2;
+                    if line > half {
+                        index = i + 1;
+                        break;
+                    } else {
+                        index = i;
+                        break;
+                    }
+                }
+                prev_end = block.end;
             }
         }
 
         let text_layout = ctx
             .text()
-            .new_text_layout(if !buffer.doc.find.borrow().occurrences().is_empty() {
-                match index {
-                    Some(index) => format!(
-                        "{}/{}",
-                        index + 1,
-                        buffer.doc.find.borrow().occurrences().len()
-                    ),
-                    None => format!(
-                        "{} results",
-                        buffer.doc.find.borrow().occurrences().len()
-                    ),
-                }
-            } else {
-                "No results".to_string()
-            })
+            .new_text_layout(format!("{index}/{count}"))
             .font(
                 data.config.ui.font_family(),
                 data.config.ui.font_size() as f64,
@@ -268,30 +274,16 @@ impl Widget<LapceTabData> for FindBox {
             .max_width(self.result_width)
             .build()
             .unwrap();
-
-        let input_size = self.input.layout_rect().size();
         ctx.draw_text(
             &text_layout,
-            Point::new(input_size.width, text_layout.y_offset(input_size.height)),
+            Point::new(
+                10.0 + 35.0 * self.icons.len() as f64,
+                text_layout.y_offset(35.0),
+            ),
         );
 
-        let case_sensitive = data
-            .main_split
-            .active_editor()
-            .map(|editor| {
-                let editor_data = data.editor_view_content(editor.view_id);
-                editor_data.find.case_sensitive()
-            })
-            .unwrap_or_default();
-
         for icon in self.icons.iter() {
-            if icon.icon == LapceIcons::SEARCH_CASE_SENSITIVE && case_sensitive {
-                ctx.fill(
-                    icon.rect,
-                    data.config
-                        .get_color_unchecked(LapceTheme::LAPCE_TAB_ACTIVE_UNDERLINE),
-                );
-            } else if icon.rect.contains(self.mouse_pos) {
+            if icon.rect.contains(self.mouse_pos) {
                 ctx.fill(
                     icon.rect,
                     &data.config.get_hover_color(

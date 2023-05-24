@@ -20,14 +20,16 @@ pub struct ReleaseAsset {
 }
 
 pub fn get_latest_release() -> Result<ReleaseInfo> {
-    let url = match *meta::RELEASE {
-        "Debug" => {
+    let url = match meta::RELEASE {
+        meta::ReleaseType::Debug => {
             return Err(anyhow!("no release for debug"));
         }
-        "Nightly" => {
+        meta::ReleaseType::Nightly => {
             "https://api.github.com/repos/lapce/lapce/releases/tags/nightly"
         }
-        _ => "https://api.github.com/repos/lapce/lapce/releases/latest",
+        meta::ReleaseType::Stable => {
+            "https://api.github.com/repos/lapce/lapce/releases/latest"
+        }
     };
 
     let resp = reqwest::blocking::ClientBuilder::new()
@@ -172,8 +174,7 @@ pub fn restart(path: &Path) -> Result<()> {
         .ok_or_else(|| anyhow!("can't get path to str"))?;
     std::process::Command::new("cmd")
         .raw_arg(format!(
-            r#"/C taskkill /PID {} & start "" "{}""#,
-            process_id, path
+            r#"/C taskkill /PID {process_id} & start "" "{path}""#
         ))
         .creation_flags(DETACHED_PROCESS)
         .spawn()?;
@@ -198,8 +199,7 @@ pub fn restart(path: &Path) -> Result<()> {
 
     std::process::Command::new("cmd")
         .raw_arg(format!(
-            r#"/C taskkill /PID {} & msiexec /i "{}" /qb & start "" "{}""#,
-            process_id, path, lapce_exe
+            r#"/C taskkill /PID {process_id} & msiexec /i "{path}" /qb & start "" "{lapce_exe}""#,
         ))
         .creation_flags(DETACHED_PROCESS)
         .spawn()?;

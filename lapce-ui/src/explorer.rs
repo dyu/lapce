@@ -13,7 +13,7 @@ use lapce_data::{
     command::{
         CommandKind, LapceCommand, LapceUICommand, LAPCE_COMMAND, LAPCE_UI_COMMAND,
     },
-    config::{LapceConfig, LapceIcons, LapceTheme},
+    config::{ClickMode, LapceConfig, LapceIcons, LapceTheme},
     data::{EditorTabChild, LapceData, LapceEditorData, LapceTabData},
     document::{BufferContent, LocalBufferKind},
     explorer::{FileExplorerData, Naming},
@@ -249,7 +249,7 @@ fn draw_name_input(
         Naming::Renaming { .. } => {
             name_edit_input.paint(ctx, data, env);
         }
-        Naming::Naming { .. } => {
+        Naming::Naming { .. } | Naming::Duplicating { .. } => {
             name_edit_input.paint(ctx, data, env);
             // Skip forward by an entry
             // This is fine since we aren't using i as an index, but as an offset-multiple in painting
@@ -687,49 +687,62 @@ impl Widget<LapceTabData> for FileExplorerFileList {
                     return;
                 }
 
+                let double_click_mode = data.config.editor.double_click.clone();
                 let file_explorer = Arc::make_mut(&mut data.file_explorer);
                 let index = ((mouse_event.pos.y + self.line_height)
                     / self.line_height) as usize;
+
                 if mouse_event.button.is_left() {
                     if let Some((_, node)) =
                         file_explorer.get_node_by_index_mut(index)
                     {
                         if node.is_dir {
-                            if node.read {
-                                node.open = !node.open;
-                            } else {
-                                let tab_id = data.id;
-                                let event_sink = ctx.get_external_handle();
-                                FileExplorerData::read_dir(
-                                    &node.path_buf,
-                                    true,
-                                    tab_id,
-                                    &data.proxy,
-                                    event_sink,
-                                );
-                            }
-                            let path = node.path_buf.clone();
-                            if let Some(paths) = file_explorer.node_tree(&path) {
-                                for path in paths.iter() {
-                                    file_explorer.update_node_count(path);
+                            let cont_open = !(matches!(
+                                double_click_mode,
+                                ClickMode::DoubleClickAll
+                            ) && mouse_event.count < 2);
+                            if cont_open {
+                                if node.read {
+                                    node.open = !node.open;
+                                } else {
+                                    let tab_id = data.id;
+                                    let event_sink = ctx.get_external_handle();
+                                    FileExplorerData::read_dir(
+                                        &node.path_buf,
+                                        true,
+                                        tab_id,
+                                        &data.proxy,
+                                        event_sink,
+                                    );
+                                }
+                                let path = node.path_buf.clone();
+                                if let Some(paths) = file_explorer.node_tree(&path) {
+                                    for path in paths.iter() {
+                                        file_explorer.update_node_count(path);
+                                    }
                                 }
                             }
                         } else {
-                            ctx.submit_command(Command::new(
-                                LAPCE_UI_COMMAND,
-                                LapceUICommand::OpenFile(
-                                    node.path_buf.clone(),
-                                    false,
-                                ),
-                                Target::Widget(data.id),
-                            ));
-                            ctx.submit_command(Command::new(
-                                LAPCE_UI_COMMAND,
-                                LapceUICommand::ActiveFileChanged {
-                                    path: Some(node.path_buf.clone()),
-                                },
-                                Target::Widget(file_explorer.widget_id),
-                            ));
+                            let cont_open =
+                                matches!(double_click_mode, ClickMode::SingleClick)
+                                    || mouse_event.count > 1;
+                            if cont_open {
+                                ctx.submit_command(Command::new(
+                                    LAPCE_UI_COMMAND,
+                                    LapceUICommand::OpenFile(
+                                        node.path_buf.clone(),
+                                        false,
+                                    ),
+                                    Target::Widget(data.id),
+                                ));
+                                ctx.submit_command(Command::new(
+                                    LAPCE_UI_COMMAND,
+                                    LapceUICommand::ActiveFileChanged {
+                                        path: Some(node.path_buf.clone()),
+                                    },
+                                    Target::Widget(file_explorer.widget_id),
+                                ));
+                            }
                         }
                     }
                 }
@@ -830,6 +843,30 @@ impl Widget<LapceTabData> for FileExplorerFileList {
                                 ),
                             );
                             menu = menu.entry(item);
+
+                            if !node.is_dir {
+                                let item = druid::MenuItem::new("Duplicate")
+                                    .command(Command::new(
+                                        LAPCE_UI_COMMAND,
+                                        LapceUICommand::ExplorerStartDuplicate {
+                                            list_index: index,
+                                            indent_level,
+                                            base_path: node
+                                                .path_buf
+                                                .parent()
+                                                .expect("file without parent")
+                                                .to_owned(),
+                                            name: node
+                                                .path_buf
+                                                .file_name()
+                                                .expect("file without name")
+                                                .to_string_lossy()
+                                                .into_owned(),
+                                        },
+                                        Target::Auto,
+                                    ));
+                                menu = menu.entry(item);
+                            }
 
                             let trash_text = if node.is_dir {
                                 "Move Directory to Trash"
@@ -949,6 +986,11 @@ impl Widget<LapceTabData> for FileExplorerFileList {
                     indent_level,
                 }
                 | Naming::Naming {
+                    list_index,
+                    indent_level,
+                    ..
+                }
+                | Naming::Duplicating {
                     list_index,
                     indent_level,
                     ..
@@ -1225,7 +1267,7 @@ impl OpenEditorList {
             }
             EditorTabChild::Settings { .. } => {
                 text = "Settings".to_string();
-                hint = format!("ver. {}", *meta::VERSION);
+                hint = format!("ver. {}", meta::VERSION);
                 svg = data.config.ui_svg(LapceIcons::SETTINGS);
             }
             EditorTabChild::Plugin { volt_name, .. } => {
@@ -1305,7 +1347,7 @@ impl OpenEditorList {
         ctx.draw_svg(&svg, svg_rect, svg_color);
 
         if !hint.is_empty() {
-            text = format!("{} {}", text, hint);
+            text = format!("{text} {hint}");
         }
         let total_len = text.len();
         let mut text_layout = ctx
@@ -1484,7 +1526,7 @@ impl Widget<LapceTabData> for OpenEditorList {
                 if self.line_height * ((i + 1) as f64) >= rect.y0 {
                     let text_layout = ctx
                         .text()
-                        .new_text_layout(format!("Group {}", g))
+                        .new_text_layout(format!("Group {g}"))
                         .font(
                             data.config.ui.font_family(),
                             data.config.ui.font_size() as f64,

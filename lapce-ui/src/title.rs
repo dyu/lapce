@@ -17,11 +17,13 @@ use lapce_data::{
     },
     config::{LapceIcons, LapceTheme},
     data::{FocusArea, LapceTabData, LapceWorkspaceType},
+    document::LocalBufferKind,
     list::ListData,
     menu::{MenuItem, MenuKind},
     palette::PaletteStatus,
     proxy::ProxyStatus,
 };
+use lapce_xi_rope::Rope;
 
 use crate::editor::view::LapceEditorView;
 #[cfg(not(target_os = "macos"))]
@@ -165,19 +167,18 @@ impl Title {
             LapceWorkspaceType::Local => data
                 .config
                 .get_color_unchecked(LapceTheme::LAPCE_REMOTE_LOCAL),
-            LapceWorkspaceType::RemoteSSH(_) | LapceWorkspaceType::RemoteWSL => {
-                match *data.proxy_status {
-                    ProxyStatus::Connecting => data
-                        .config
-                        .get_color_unchecked(LapceTheme::LAPCE_REMOTE_CONNECTING),
-                    ProxyStatus::Connected => data
-                        .config
-                        .get_color_unchecked(LapceTheme::LAPCE_REMOTE_CONNECTED),
-                    ProxyStatus::Disconnected => data
-                        .config
-                        .get_color_unchecked(LapceTheme::LAPCE_REMOTE_DISCONNECTED),
-                }
-            }
+            // LapceWorkspaceType::Remote*
+            _ => match *data.proxy_status {
+                ProxyStatus::Connecting => data
+                    .config
+                    .get_color_unchecked(LapceTheme::LAPCE_REMOTE_CONNECTING),
+                ProxyStatus::Connected => data
+                    .config
+                    .get_color_unchecked(LapceTheme::LAPCE_REMOTE_CONNECTED),
+                ProxyStatus::Disconnected => data
+                    .config
+                    .get_color_unchecked(LapceTheme::LAPCE_REMOTE_DISCONNECTED),
+            },
         };
         self.rects.push((remote_rect, color.clone()));
         let remote_svg = data.config.ui_svg(LapceIcons::REMOTE);
@@ -408,7 +409,7 @@ impl Title {
                 desc: Some(if data.update_in_progress && latest_version.is_some() {
                     format!("Update in progress ({}) ", latest_version.unwrap())
                 } else if latest_version.is_some()
-                    && latest_version != Some(*meta::VERSION)
+                    && latest_version != Some(meta::VERSION)
                 {
                     format!("Restart to update ({})", latest_version.unwrap())
                 } else {
@@ -421,7 +422,7 @@ impl Title {
                     data: None,
                 },
                 enabled: latest_version.is_some()
-                    && latest_version != Some(*meta::VERSION)
+                    && latest_version != Some(meta::VERSION)
                     && !data.update_in_progress,
             }),
             MenuKind::Separator,
@@ -434,7 +435,7 @@ impl Title {
                 enabled: true,
             }),
         ];
-        if latest_version.is_some() && latest_version != Some(*meta::VERSION) {
+        if latest_version.is_some() && latest_version != Some(meta::VERSION) {
             let text_layout = piet_text
                 .new_text_layout("1")
                 .font(data.config.ui.font_family(), 10.0)
@@ -527,6 +528,7 @@ impl Title {
             LapceWorkspaceType::RemoteSSH(ssh) => {
                 format!(" [SSH: {}]", ssh.host)
             }
+            #[cfg(windows)]
             LapceWorkspaceType::RemoteWSL => " [WSL]".to_string(),
         };
         let text = format!("{path}{remote}");
@@ -1122,6 +1124,13 @@ impl Widget<LapceTabData> for SourceControlBranches {
                         ctx.set_handled();
                     }
                     LapceUICommand::ShowGitBranches { origin, branches } => {
+                        let doc = data
+                            .main_split
+                            .local_docs
+                            .get_mut(&LocalBufferKind::BranchesFilter)
+                            .unwrap();
+                        Arc::make_mut(doc).reload(Rope::from(""), true);
+
                         let title = Arc::make_mut(&mut data.title);
                         title.branches.list.clear_items();
                         self.branches = branches.clone();

@@ -141,10 +141,12 @@ impl Buffer {
         }
     }
 
+    /// The current buffer revision
     pub fn rev(&self) -> u64 {
         self.revs.last().unwrap().num
     }
 
+    /// Mark the buffer as pristine (aka 'saved')
     pub fn set_pristine(&mut self) {
         self.pristine_rev_id = self.rev();
     }
@@ -890,6 +892,10 @@ impl Buffer {
         }
     }
 
+    /// Get the content of the rope as a Cow string, for 'nice' ranges (small, and at the right
+    /// offsets) this will be a reference to the rope's data. Otherwise, it allocates a new string.
+    /// You should be somewhat wary of requesting large parts of the rope, as it will allocate
+    /// a new string since it isn't contiguous in memory for large chunks.
     pub fn slice_to_cow(&self, range: Range<usize>) -> Cow<str> {
         self.text
             .slice_to_cow(range.start.min(self.len())..range.end.min(self.len()))
@@ -1049,7 +1055,7 @@ pub enum DiffResult<T> {
     Right(T),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DiffLines {
     Left(Range<usize>),
     Both(Range<usize>, Range<usize>),
@@ -1062,6 +1068,7 @@ pub fn rope_diff(
     right_rope: Rope,
     rev: u64,
     atomic_rev: Arc<AtomicU64>,
+    context_lines: Option<usize>,
 ) -> Option<Vec<DiffLines>> {
     let left_lines = left_rope.lines(..).collect::<Vec<Cow<str>>>();
     let right_lines = right_rope.lines(..).collect::<Vec<Cow<str>>>();
@@ -1190,56 +1197,67 @@ pub fn rope_diff(
             right_count - trailing_equals..right_count,
         ));
     }
-    if !changes.is_empty() {
-        let changes_last = changes.len() - 1;
-        for (i, change) in changes.clone().iter().enumerate().rev() {
-            if atomic_rev.load(atomic::Ordering::Acquire) != rev {
-                return None;
-            }
-            if let DiffLines::Both(l, r) = change {
-                if i == 0 || i == changes_last {
-                    if r.len() > 3 {
-                        if i == 0 {
-                            changes[i] =
-                                DiffLines::Both(l.end - 3..l.end, r.end - 3..r.end);
-                            changes.insert(
-                                i,
-                                DiffLines::Skip(
-                                    l.start..l.end - 3,
-                                    r.start..r.end - 3,
-                                ),
-                            );
-                        } else {
-                            changes[i] = DiffLines::Skip(
-                                l.start + 3..l.end,
-                                r.start + 3..r.end,
-                            );
-                            changes.insert(
-                                i,
-                                DiffLines::Both(
-                                    l.start..l.start + 3,
-                                    r.start..r.start + 3,
-                                ),
-                            );
+    if let Some(context_lines) = context_lines {
+        if !changes.is_empty() {
+            let changes_last = changes.len() - 1;
+            for (i, change) in changes.clone().iter().enumerate().rev() {
+                if atomic_rev.load(atomic::Ordering::Acquire) != rev {
+                    return None;
+                }
+                if let DiffLines::Both(l, r) = change {
+                    if i == 0 || i == changes_last {
+                        if r.len() > context_lines {
+                            if i == 0 {
+                                changes[i] = DiffLines::Both(
+                                    l.end - context_lines..l.end,
+                                    r.end - context_lines..r.end,
+                                );
+                                changes.insert(
+                                    i,
+                                    DiffLines::Skip(
+                                        l.start..l.end - context_lines,
+                                        r.start..r.end - context_lines,
+                                    ),
+                                );
+                            } else {
+                                changes[i] = DiffLines::Skip(
+                                    l.start + context_lines..l.end,
+                                    r.start + context_lines..r.end,
+                                );
+                                changes.insert(
+                                    i,
+                                    DiffLines::Both(
+                                        l.start..l.start + context_lines,
+                                        r.start..r.start + context_lines,
+                                    ),
+                                );
+                            }
                         }
+                    } else if r.len() > context_lines * 2 {
+                        changes[i] = DiffLines::Both(
+                            l.end - context_lines..l.end,
+                            r.end - context_lines..r.end,
+                        );
+                        changes.insert(
+                            i,
+                            DiffLines::Skip(
+                                l.start + context_lines..l.end - context_lines,
+                                r.start + context_lines..r.end - context_lines,
+                            ),
+                        );
+                        changes.insert(
+                            i,
+                            DiffLines::Both(
+                                l.start..l.start + context_lines,
+                                r.start..r.start + context_lines,
+                            ),
+                        );
                     }
-                } else if r.len() > 6 {
-                    changes[i] = DiffLines::Both(l.end - 3..l.end, r.end - 3..r.end);
-                    changes.insert(
-                        i,
-                        DiffLines::Skip(
-                            l.start + 3..l.end - 3,
-                            r.start + 3..r.end - 3,
-                        ),
-                    );
-                    changes.insert(
-                        i,
-                        DiffLines::Both(l.start..l.start + 3, r.start..r.start + 3),
-                    );
                 }
             }
         }
     }
+
     Some(changes)
 }
 

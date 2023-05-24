@@ -137,7 +137,7 @@ impl LapceEditorTabHeader {
                 }
                 EditorTabChild::Settings { .. } => {
                     text = "Settings".to_string();
-                    hint = format!("ver. {}", *meta::VERSION);
+                    hint = format!("ver. {}", meta::VERSION);
                     svg = data.config.ui_svg(LapceIcons::SETTINGS);
                 }
                 EditorTabChild::Plugin { volt_name, .. } => {
@@ -160,7 +160,7 @@ impl LapceEditorTabHeader {
         ctx.draw_svg(&svg, svg_rect, svg_color);
 
         if !hint.is_empty() {
-            text = format!("{} {}", text, hint);
+            text = format!("{text} {hint}");
         }
         let total_len = text.len();
         let mut text_layout = ctx

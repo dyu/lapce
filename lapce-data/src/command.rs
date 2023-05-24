@@ -11,6 +11,7 @@ use lapce_core::{
         EditCommand, FocusCommand, MotionModeCommand, MoveCommand,
         MultiSelectionCommand,
     },
+    movement::LineCol,
     syntax::Syntax,
 };
 use lapce_rpc::{
@@ -25,7 +26,7 @@ use lapce_xi_rope::{spans::Spans, Rope};
 use lsp_types::{
     CodeActionOrCommand, CodeActionResponse, CompletionItem, CompletionResponse,
     InlayHint, Location, MessageType, Position, ProgressParams,
-    PublishDiagnosticsParams, SelectionRange, SignatureHelp, TextEdit,
+    PublishDiagnosticsParams, SelectionRange, SignatureHelp, TextEdit, Url,
     WorkspaceEdit,
 };
 use serde_json::Value;
@@ -39,13 +40,14 @@ use crate::{
         SplitContent,
     },
     document::BufferContent,
-    editor::{EditorLocation, EditorPosition, Line, LineCol},
+    editor::{EditorLocation, EditorPosition, Line},
+    images,
     keypress::{KeyMap, KeyPress},
+    markdown::Content,
     menu::MenuKind,
     palette::{PaletteItem, PaletteType},
     plugin::{PluginsInfo, VoltIconKind},
     proxy::ProxyStatus,
-    rich_text::RichText,
     search::Match,
     selection_range::SelectionRangeDirection,
     settings::LapceSettingsKind,
@@ -115,8 +117,9 @@ impl LapceCommand {
                 | LapceWorkbenchCommand::ChangeColorTheme
                 | LapceWorkbenchCommand::ChangeIconTheme
                 | LapceWorkbenchCommand::ConnectSshHost
-                | LapceWorkbenchCommand::ConnectWsl
                 | LapceWorkbenchCommand::PaletteWorkspace => return true,
+                #[cfg(windows)]
+                LapceWorkbenchCommand::ConnectWsl => return true,
                 _ => {}
             }
         }
@@ -221,6 +224,10 @@ pub enum LapceWorkbenchCommand {
     #[strum(message = "Reveal Active File in File Explorer")]
     RevealActiveFileInFileExplorer,
 
+    #[strum(serialize = "reveal_active_file_in_file_tree")]
+    #[strum(message = "Reveal Active File in File Tree")]
+    RevealActiveFileInFileTree,
+
     #[strum(serialize = "change_color_theme")]
     #[strum(message = "Change Color Theme")]
     ChangeColorTheme,
@@ -321,6 +328,7 @@ pub enum LapceWorkbenchCommand {
     #[strum(message = "Connect to SSH Host")]
     ConnectSshHost,
 
+    #[cfg(windows)]
     #[strum(serialize = "connect_wsl")]
     #[strum(message = "Connect to WSL")]
     ConnectWsl,
@@ -562,12 +570,11 @@ pub enum LapceUICommand {
     /// Update global search input with the given pattern
     UpdateSearchInput(String),
     /// Update the global search with the given pattern (actually performs the search)
-    UpdateSearch(String),
-    /// Update the global search with the given pattern (actually performs the search)
-    UpdateSearchWithCaseSensitivity {
-        pattern: String,
-        case_sensitive: bool,
-    },
+    UpdateSearch(
+        String,
+        // If present, will update the case-sensitivity
+        Option<bool>,
+    ),
     /// Informs the editor of the results from the global search, this is caused by the
     /// `UpdateSearch{,WithCaseSensitivity}` commands
     GlobalSearchResult(String, Arc<IndexMap<PathBuf, Vec<Match>>>),
@@ -624,19 +631,25 @@ pub enum LapceUICommand {
         offset: usize,
         item: Box<CompletionItem>,
     },
+    /// Completion 'internal' event that indicates that it should recompute the layouts for
+    /// the completion documentation.
+    RefreshCompletionDocumentation,
     /// Received when the request for signature information has completed
     UpdateSignature {
         request_id: usize,
         resp: SignatureHelp,
         plugin_id: PluginId,
     },
+    /// Signature 'internal' event that indicates that it should recompute the layouts for
+    /// the signature view.
+    RefreshSignature,
     /// Received when the request for hover information has completed
     UpdateHover {
         request_id: usize,
-        items: Arc<Vec<RichText>>,
+        items: Arc<Vec<Content>>,
     },
     /// Received when the request for the plugin's description completed
-    UpdateVoltReadme(RichText),
+    UpdateVoltReadme(Arc<Vec<Content>>),
     UpdateInlayHints {
         path: PathBuf,
         rev: u64,
@@ -843,6 +856,7 @@ pub enum LapceUICommand {
         rev: u64,
         history: String,
         changes: Arc<Vec<DiffLines>>,
+        diff_context_lines: i32,
     },
     /// Publish diagnostics changes (from the proxy)
     PublishDiagnostics(PublishDiagnosticsParams),
@@ -924,7 +938,6 @@ pub enum LapceUICommand {
     },
     /// Informs the editor about the locations for requested references
     PaletteReferences(usize, Vec<Location>),
-    GotoLocation(Location),
     /// Update the current file highlighted in the explorer panel
     ActiveFileChanged {
         path: Option<PathBuf>,
@@ -936,6 +949,11 @@ pub enum LapceUICommand {
     CreateDirectory {
         path: PathBuf,
     },
+    /// Copy an existing file to the given name and then open it
+    DuplicateFileOpen {
+        existing_path: PathBuf,
+        new_path: PathBuf,
+    },
     RenamePath {
         from: PathBuf,
         to: PathBuf,
@@ -943,6 +961,17 @@ pub enum LapceUICommand {
     /// Move a file/directory to the os-specific trash
     TrashPath {
         path: PathBuf,
+    },
+    /// Start duplicating a specific file in view at the given index
+    ExplorerStartDuplicate {
+        /// The index into the explorer's file listing
+        list_index: usize,
+        /// The level that it should be indented to
+        indent_level: usize,
+        /// The folder that the file/directory is being created within
+        base_path: PathBuf,
+        /// The name of the file being duplicated
+        name: String,
     },
     /// Start renaming a specific file in view at the given index
     ExplorerStartRename {
@@ -1001,6 +1030,10 @@ pub enum LapceUICommand {
         message: String,
     },
     CloseMessage(WidgetId),
+    ImageLoaded {
+        url: Url,
+        image: Result<images::Image, anyhow::Error>,
+    },
 }
 
 /// This can't be an `FnOnce` because we only ever get a reference to

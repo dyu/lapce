@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{atomic::AtomicBool, Arc},
 };
 
 use druid::{
@@ -14,7 +14,7 @@ use lapce_proxy::plugin::wasi::find_all_volts;
 use lapce_rpc::plugin::VoltID;
 use lsp_types::{CompletionItemKind, SymbolKind};
 use once_cell::sync::Lazy;
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use structdesc::FieldNames;
 use thiserror::Error;
@@ -99,6 +99,8 @@ impl LapceTheme {
     pub const ERROR_LENS_OTHER_FOREGROUND: &str = "error_lens.other.foreground";
     pub const ERROR_LENS_OTHER_BACKGROUND: &str = "error_lens.other.background";
 
+    pub const COMPLETION_LENS_FOREGROUND: &str = "completion_lens.foreground";
+
     pub const SOURCE_CONTROL_ADDED: &str = "source_control.added";
     pub const SOURCE_CONTROL_REMOVED: &str = "source_control.removed";
     pub const SOURCE_CONTROL_MODIFIED: &str = "source_control.modified";
@@ -149,10 +151,22 @@ impl LapceTheme {
 
     pub const STATUS_BACKGROUND: &str = "status.background";
     pub const STATUS_FOREGROUND: &str = "status.foreground";
-    pub const STATUS_MODAL_NORMAL: &str = "status.modal.normal";
-    pub const STATUS_MODAL_INSERT: &str = "status.modal.insert";
-    pub const STATUS_MODAL_VISUAL: &str = "status.modal.visual";
-    pub const STATUS_MODAL_TERMINAL: &str = "status.modal.terminal";
+    pub const STATUS_MODAL_NORMAL_BACKGROUND: &str =
+        "status.modal.normal.background";
+    pub const STATUS_MODAL_NORMAL_FOREGROUND: &str =
+        "status.modal.normal.foreground";
+    pub const STATUS_MODAL_INSERT_BACKGROUND: &str =
+        "status.modal.insert.background";
+    pub const STATUS_MODAL_INSERT_FOREGROUND: &str =
+        "status.modal.insert.foreground";
+    pub const STATUS_MODAL_VISUAL_BACKGROUND: &str =
+        "status.modal.visual.background";
+    pub const STATUS_MODAL_VISUAL_FOREGROUND: &str =
+        "status.modal.visual.foreground";
+    pub const STATUS_MODAL_TERMINAL_BACKGROUND: &str =
+        "status.modal.terminal.background";
+    pub const STATUS_MODAL_TERMINAL_FOREGROUND: &str =
+        "status.modal.terminal.foreground";
 
     pub const PALETTE_INPUT_LINE_HEIGHT: druid::Key<f64> =
         druid::Key::new("lapce.palette_input_line_height");
@@ -206,6 +220,9 @@ impl LapceIcons {
     pub const FILE: &str = "file";
     pub const FILE_EXPLORER: &str = "file_explorer";
     pub const FILE_PICKER_UP: &str = "file_picker_up";
+
+    pub const IMAGE_LOADING: &str = "image_loading";
+    pub const IMAGE_ERROR: &str = "image_error";
 
     pub const SCM: &str = "scm.icon";
     pub const SCM_DIFF_MODIFIED: &str = "scm.diff.modified";
@@ -300,6 +317,17 @@ impl LapceIcons {
     pub const COMPLETION_ITEM_KIND_VARIABLE: &str = "completion_item_kind.variable";
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub enum ClickMode {
+    #[default]
+    #[serde(rename = "single")]
+    SingleClick,
+    #[serde(rename = "file")]
+    DoubleClickFile,
+    #[serde(rename = "all")]
+    DoubleClickAll,
+}
+
 pub trait GetConfig {
     fn get_config(&self) -> &LapceConfig;
 }
@@ -380,6 +408,9 @@ pub struct EditorConfig {
     #[field_names(desc = "If matching brackets are highlighted")]
     pub highlight_matching_brackets: bool,
 
+    #[field_names(desc = "If all occurrences of the selected text are highlighted")]
+    pub highlight_selection_occurrences: bool,
+
     #[field_names(desc = "If scope lines are highlighted")]
     pub highlight_scope_lines: bool,
 
@@ -409,9 +440,21 @@ pub struct EditorConfig {
     )]
     pub error_lens_font_size: usize,
     #[field_names(
+        desc = "If the editor should display the completion item as phantom text"
+    )]
+    pub enable_completion_lens: bool,
+    #[field_names(
+        desc = "Set completion lens font family. If empty, it uses the inlay hint font family."
+    )]
+    pub completion_lens_font_family: String,
+    #[field_names(
+        desc = "Set the completion lens font size. If 0 it uses the inlay hint font size."
+    )]
+    pub completion_lens_font_size: usize,
+    #[field_names(
         desc = "Set the cursor blink interval (in milliseconds). Set to 0 to completely disable."
     )]
-    pub blink_interval: u64, // TODO: change to u128 when upgrading config-rs to >0.11
+    pub blink_interval: u64,
     #[field_names(
         desc = "Whether the multiple cursor selection is case sensitive."
     )]
@@ -438,6 +481,20 @@ pub struct EditorConfig {
         desc = "If enabled the cursor treats leading soft tabs as if they are hard tabs."
     )]
     pub atomic_soft_tabs: bool,
+    #[field_names(
+        desc = "Use a double click to interact with the file explorer.\nOptions: single (default), file or all."
+    )]
+    pub double_click: ClickMode,
+    #[field_names(desc = "Move the focus as you type in the global search box")]
+    pub move_focus_while_search: bool,
+    #[field_names(
+        desc = "Set the default number of visible lines above and below the diff block (-1 for infinite)"
+    )]
+    pub diff_context_lines: i32,
+    #[field_names(
+        desc = "Scroll speed modifier. The scroll delta will be multiplied by whatever the value is povided here. Defaults to 1."
+    )]
+    pub scroll_speed_modifier: f64,
 }
 
 impl EditorConfig {
@@ -493,6 +550,33 @@ impl EditorConfig {
             self.inlay_hint_font_size()
         } else {
             self.error_lens_font_size
+        }
+    }
+
+    pub fn completion_lens_font_family(&self) -> FontFamily {
+        if self.completion_lens_font_family.is_empty() {
+            self.inlay_hint_font_family()
+        } else {
+            FontFamily::new_unchecked(self.completion_lens_font_family.clone())
+        }
+    }
+
+    pub fn completion_lens_font_size(&self) -> usize {
+        if self.completion_lens_font_size == 0 {
+            self.inlay_hint_font_size()
+        } else {
+            self.completion_lens_font_size
+        }
+    }
+
+    pub fn blink_interval(&self) -> u64 {
+        match self.blink_interval {
+            0 => 0,
+            // We disallow anything below 100ms
+            // in case user has weak machine, as
+            // it would lock up the thread
+            v if v < 100 => 100,
+            v => v,
         }
     }
 }
@@ -897,7 +981,7 @@ pub struct LapceConfig {
     icon_theme_list: im::Vector<String>,
 }
 impl LapceConfig {
-    /// Get the dropdown information for the specific setting, used for the settings UI.  
+    /// Get the dropdown information for the specific setting, used for the settings UI.
     /// This should aim to efficiently return the data, because it is used to determine whether to
     /// update the dropdown items.
     pub fn get_dropdown_info(&self, kind: &str, key: &str) -> Option<DropdownInfo> {
@@ -923,14 +1007,14 @@ impl LapceConfig {
 
 pub struct ConfigWatcher {
     event_sink: ExtEventSink,
-    delay_handler: Arc<Mutex<Option<()>>>,
+    delay_handler: Arc<AtomicBool>,
 }
 
 impl ConfigWatcher {
     pub fn new(event_sink: ExtEventSink) -> Self {
         Self {
             event_sink,
-            delay_handler: Arc::new(Mutex::new(None)),
+            delay_handler: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -942,21 +1026,33 @@ impl notify::EventHandler for ConfigWatcher {
                 notify::EventKind::Create(_)
                 | notify::EventKind::Modify(_)
                 | notify::EventKind::Remove(_) => {
-                    *self.delay_handler.lock() = Some(());
-                    let delay_handler = self.delay_handler.clone();
-                    let event_sink = self.event_sink.clone();
-                    std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(500));
-                        if delay_handler.lock().take().is_some() {
+                    if self
+                        .delay_handler
+                        .compare_exchange(
+                            false,
+                            true,
+                            std::sync::atomic::Ordering::Relaxed,
+                            std::sync::atomic::Ordering::Relaxed,
+                        )
+                        .is_ok()
+                    {
+                        let config_mutex = self.delay_handler.clone();
+                        let event_sink = self.event_sink.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                500,
+                            ));
                             let _ = event_sink.submit_command(
                                 LAPCE_UI_COMMAND,
                                 LapceUICommand::ReloadConfig,
                                 Target::Auto,
                             );
-                        }
-                    });
+                            config_mutex
+                                .store(false, std::sync::atomic::Ordering::Relaxed);
+                        });
+                    }
                 }
-                _ => (),
+                _ => {}
             }
         }
     }
@@ -1094,6 +1190,7 @@ impl LapceConfig {
                 }
             }
             LapceWorkspaceType::RemoteSSH(_) => {}
+            #[cfg(windows)]
             LapceWorkspaceType::RemoteWSL => {}
         }
 

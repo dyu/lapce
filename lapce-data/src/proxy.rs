@@ -25,7 +25,7 @@ use lapce_rpc::{
     RequestId, RpcMessage,
 };
 use lapce_xi_rope::Rope;
-use lsp_types::Url;
+use lsp_types::{LogMessageParams, MessageType, Url};
 use parking_lot::Mutex;
 use serde_json::Value;
 use thiserror::Error;
@@ -175,7 +175,23 @@ impl CoreHandler for LapceProxy {
                     Target::Widget(self.tab_id),
                 );
             }
-            LogMessage { .. } => {}
+            LogMessage {
+                message: LogMessageParams { message, typ },
+            } => match typ {
+                MessageType::ERROR => {
+                    log::error!("{message}")
+                }
+                MessageType::WARNING => {
+                    log::warn!("{message}")
+                }
+                MessageType::INFO => {
+                    log::info!("{message}")
+                }
+                MessageType::LOG => {
+                    log::debug!("{message}")
+                }
+                _ => {}
+            },
             ShowMessage { title, message } => {
                 let _ = self.event_sink.submit_command(
                     LAPCE_UI_COMMAND,
@@ -363,6 +379,7 @@ impl LapceProxy {
             LapceWorkspaceType::RemoteSSH(ssh) => {
                 self.start_remote(SshRemote { ssh })?;
             }
+            #[cfg(windows)]
             LapceWorkspaceType::RemoteWSL => {
                 let distro = WslDistro::all()?
                     .into_iter()
@@ -380,10 +397,7 @@ impl LapceProxy {
     }
 
     fn start_remote(&self, remote: impl Remote) -> Result<()> {
-        let proxy_version = match *meta::RELEASE {
-            "Debug" | "Nightly" => "nightly".to_string(),
-            _ => format!("v{}", *meta::VERSION),
-        };
+        let proxy_version = meta::TAG;
 
         // start ssh CM connection in case where it doesn't handle
         // executing command properly on remote host
@@ -422,14 +436,14 @@ impl LapceProxy {
         let remote_proxy_path = match platform {
             Windows => format!(
                 "%HOMEDRIVE%%HOMEPATH%\\AppData\\Local\\lapce\\{}\\data\\proxy",
-                *meta::NAME
+                meta::NAME
             ),
             Darwin => format!(
                 "~/Library/Application\\ Support/dev.lapce.{}/proxy",
-                *meta::NAME
+                meta::NAME
             ),
             _ => {
-                format!("~/.local/share/{}/proxy", (*meta::NAME).to_lowercase())
+                format!("~/.local/share/{}/proxy", meta::NAME.to_lowercase())
             }
         };
 
@@ -454,7 +468,7 @@ impl LapceProxy {
                         "-c",
                         remote_proxy_script,
                         "-version",
-                        &proxy_version,
+                        proxy_version,
                         "-directory",
                         &remote_proxy_path,
                     ])
@@ -486,7 +500,7 @@ impl LapceProxy {
 
                 let cmd = remote
                     .command_builder()
-                    .args([remote_proxy_script, &proxy_version, &remote_proxy_path])
+                    .args([remote_proxy_script, proxy_version, &remote_proxy_path])
                     .output()?;
                 log::debug!(target: "lapce_data::proxy::upload_file", "{}", String::from_utf8_lossy(&cmd.stderr));
                 log::debug!(target: "lapce_data::proxy::upload_file", "{}", String::from_utf8_lossy(&cmd.stdout));
@@ -500,7 +514,7 @@ impl LapceProxy {
             _ => format!("{remote_proxy_path}/lapce"),
         };
 
-        let proxy_filename = format!("lapce-proxy-{}-{}", platform, architecture);
+        let proxy_filename = format!("lapce-proxy-{platform}-{architecture}");
 
         log::debug!(target: "lapce_data::proxy::start_remote", "remote proxy path: {remote_proxy_path}");
 
@@ -796,7 +810,7 @@ struct SshRemote {
 
 impl SshRemote {
     #[cfg(windows)]
-    const SSH_ARGS: &'static [&'static str] = &["-o", "ConnectTimeout=15"];
+    const SSH_ARGS: &'static [&'static str] = &[];
 
     #[cfg(unix)]
     const SSH_ARGS: &'static [&'static str] = &[
@@ -850,12 +864,14 @@ impl Remote for SshRemote {
     }
 }
 
+#[cfg(windows)]
 #[derive(Debug)]
 struct WslDistro {
     pub name: String,
     pub default: bool,
 }
 
+#[cfg(windows)]
 impl WslDistro {
     fn all() -> Result<Vec<WslDistro>> {
         let cmd = new_command("wsl")
@@ -890,10 +906,12 @@ impl WslDistro {
     }
 }
 
+#[cfg(windows)]
 struct WslRemote {
     distro: String,
 }
 
+#[cfg(windows)]
 impl Remote for WslRemote {
     fn upload_file(&self, local: impl AsRef<Path>, remote: &str) -> Result<()> {
         let mut wsl_path = Path::new(r"\\wsl.localhost\").join(&self.distro);
@@ -926,13 +944,7 @@ pub fn path_from_url(url: &Url) -> PathBuf {
     if let Some(path) = path.strip_prefix('/') {
         if let Some((maybe_drive_letter, _)) = path.split_once(['/', '\\']) {
             let b = maybe_drive_letter.as_bytes();
-            if b.len() == 2
-                && matches!(
-                    b[0],
-                    b'a'..=b'z' | b'A'..=b'Z'
-                )
-                && b[1] == b':'
-            {
+            if b.len() == 2 && b[0].is_ascii_alphabetic() && b[1] == b':' {
                 return PathBuf::from(path);
             }
         }

@@ -27,6 +27,7 @@ use lapce_data::{
 };
 
 use crate::{
+    diff::DiffBox,
     editor::{
         container::LapceEditorContainer, header::LapceEditorHeader, LapceEditor,
     },
@@ -41,6 +42,7 @@ pub struct LapceEditorView {
     pub header: WidgetPod<LapceTabData, LapceEditorHeader>,
     pub editor: WidgetPod<LapceTabData, LapceEditorContainer>,
     pub find: Option<WidgetPod<LapceTabData, Box<dyn Widget<LapceTabData>>>>,
+    pub diff: WidgetPod<LapceTabData, Box<dyn Widget<LapceTabData>>>,
     cursor_blink_timer: TimerToken,
     autosave_timer: TimerToken,
     display_border: bool,
@@ -89,11 +91,13 @@ impl LapceEditorView {
             WidgetPod::new(FindBox::new(find_view_id, find_editor_id, view_id))
                 .boxed()
         });
+        let diff = WidgetPod::new(DiffBox::new(view_id)).boxed();
         Self {
             view_id,
             header: WidgetPod::new(header),
             editor: WidgetPod::new(editor),
             find,
+            diff,
             cursor_blink_timer: TimerToken::INVALID,
             autosave_timer: TimerToken::INVALID,
             display_border: true,
@@ -175,6 +179,7 @@ impl LapceEditorView {
                 LocalBufferKind::Settings => {}
                 LocalBufferKind::PluginSearch => {}
                 LocalBufferKind::BranchesFilter => {}
+                LocalBufferKind::SettingsFilter => {}
                 LocalBufferKind::Palette => {
                     data.focus_area = FocusArea::Palette;
                 }
@@ -572,6 +577,13 @@ impl Widget<LapceTabData> for LapceEditorView {
                 }
             }
         }
+        match event {
+            Event::Command(cmd) if cmd.is(LAPCE_UI_COMMAND) => {}
+            Event::Command(cmd) if cmd.is(LAPCE_COMMAND) => {}
+            _ => {
+                self.diff.event(ctx, event, data, env);
+            }
+        }
 
         if ctx.is_handled() {
             return;
@@ -591,9 +603,11 @@ impl Widget<LapceTabData> for LapceEditorView {
                 let command = cmd.get_unchecked(LAPCE_UI_COMMAND);
                 if let LapceUICommand::Focus = command {
                     let editor_data = data.editor_view_content(self.view_id);
-                    if data.config.editor.blink_interval > 0 {
+                    if data.config.editor.blink_interval() > 0 {
                         self.cursor_blink_timer = ctx.request_timer(
-                            Duration::from_millis(data.config.editor.blink_interval),
+                            Duration::from_millis(
+                                data.config.editor.blink_interval(),
+                            ),
                             None,
                         );
                         *editor_data.editor.last_cursor_instant.borrow_mut() =
@@ -612,11 +626,13 @@ impl Widget<LapceTabData> for LapceEditorView {
             }
             Event::Timer(id) if self.cursor_blink_timer == *id => {
                 ctx.set_handled();
-                if data.config.editor.blink_interval > 0 {
+                if data.config.editor.blink_interval() > 0 {
                     if ctx.is_focused() {
                         ctx.request_paint();
                         self.cursor_blink_timer = ctx.request_timer(
-                            Duration::from_millis(data.config.editor.blink_interval),
+                            Duration::from_millis(
+                                data.config.editor.blink_interval(),
+                            ),
                             None,
                         );
                     } else {
@@ -677,9 +693,11 @@ impl Widget<LapceTabData> for LapceEditorView {
             Event::KeyDown(key_event) => {
                 ctx.set_handled();
                 if key_event.is_composing {
-                    if data.config.editor.blink_interval > 0 {
+                    if data.config.editor.blink_interval() > 0 {
                         self.cursor_blink_timer = ctx.request_timer(
-                            Duration::from_millis(data.config.editor.blink_interval),
+                            Duration::from_millis(
+                                data.config.editor.blink_interval(),
+                            ),
                             None,
                         );
                         *editor_data.editor.last_cursor_instant.borrow_mut() =
@@ -781,7 +799,7 @@ impl Widget<LapceTabData> for LapceEditorView {
         if let Some(find) = self.find.as_mut() {
             find.lifecycle(ctx, event, data, env);
         }
-
+        self.diff.lifecycle(ctx, event, data, env);
         match event {
             LifeCycle::WidgetAdded => {
                 let editor = data.main_split.editors.get(&self.view_id).unwrap();
@@ -908,14 +926,14 @@ impl Widget<LapceTabData> for LapceEditorView {
         if let Some(find) = self.find.as_mut() {
             find.update(ctx, data, env);
         }
-
+        self.diff.update(ctx, data, env);
         let old_editor_data = old_data.editor_view_content(self.view_id);
         let editor_data = data.editor_view_content(self.view_id);
 
         let offset = editor_data.editor.cursor.offset();
         let old_offset = old_editor_data.editor.cursor.offset();
 
-        if data.config.editor.blink_interval > 0 && *data.focus == self.view_id {
+        if data.config.editor.blink_interval() > 0 && *data.focus == self.view_id {
             let reset = if *old_data.focus != self.view_id {
                 true
             } else {
@@ -930,7 +948,7 @@ impl Widget<LapceTabData> for LapceEditorView {
 
             if reset {
                 self.cursor_blink_timer = ctx.request_timer(
-                    Duration::from_millis(data.config.editor.blink_interval),
+                    Duration::from_millis(data.config.editor.blink_interval()),
                     None,
                 );
                 *editor_data.editor.last_cursor_instant.borrow_mut() =
@@ -1137,7 +1155,13 @@ impl Widget<LapceTabData> for LapceEditorView {
                 Point::new(size.width - find_size.width - 10.0, header_size.height),
             );
         }
-
+        let diff_size = self.diff.layout(ctx, bc, data, env);
+        self.diff.set_origin(
+            ctx,
+            data,
+            env,
+            Point::new(size.width - diff_size.width - 10.0, header_size.height),
+        );
         size
     }
 
@@ -1170,5 +1194,6 @@ impl Widget<LapceTabData> for LapceEditorView {
         if let Some(find) = self.find.as_mut() {
             find.paint(ctx, data, env);
         }
+        self.diff.paint(ctx, data, env);
     }
 }

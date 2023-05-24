@@ -35,12 +35,12 @@ use lsp_types::{
     },
     CodeActionProviderCapability, DidChangeTextDocumentParams,
     DidSaveTextDocumentParams, DocumentSelector, HoverProviderCapability,
-    LogMessageParams, OneOf, ProgressParams, PublishDiagnosticsParams, Range,
-    Registration, RegistrationParams, SemanticTokens, SemanticTokensLegend,
-    SemanticTokensServerCapabilities, ServerCapabilities, ShowMessageParams,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier,
-    TextDocumentSaveRegistrationOptions, TextDocumentSyncCapability,
-    TextDocumentSyncKind, TextDocumentSyncSaveOptions,
+    InitializeResult, LogMessageParams, OneOf, ProgressParams,
+    PublishDiagnosticsParams, Range, Registration, RegistrationParams,
+    SemanticTokens, SemanticTokensLegend, SemanticTokensServerCapabilities,
+    ServerCapabilities, ShowMessageParams, TextDocumentContentChangeEvent,
+    TextDocumentIdentifier, TextDocumentSaveRegistrationOptions,
+    TextDocumentSyncCapability, TextDocumentSyncKind, TextDocumentSyncSaveOptions,
     VersionedTextDocumentIdentifier,
 };
 use parking_lot::Mutex;
@@ -96,6 +96,7 @@ impl<Resp, Error, F: Send + FnOnce(Result<Resp, Error>)> RpcCallback<Resp, Error
 
 pub enum PluginHandlerNotification {
     Initialize,
+    InitializeResult(InitializeResult),
     Shutdown,
 }
 
@@ -285,10 +286,12 @@ impl PluginServerRpcHandler {
         }
     }
 
-    /// Make a request to plugin/language server and get the response
-    /// when check is true, the request will be in the handler mainloop to
-    /// do checks like if the server has the capability of the request
-    /// when check is false, the request will be sent out straight away
+    /// Make a request to plugin/language server and get the response.
+    ///
+    /// When check is true, the request will be in the handler mainloop to
+    /// do checks like if the server has the capability of the request.
+    ///
+    /// When check is false, the request will be sent out straight away.
     pub fn server_request<P: Serialize>(
         &self,
         method: &'static str,
@@ -471,7 +474,7 @@ pub fn handle_plugin_server_message(
 ) -> Option<JsonRpc> {
     match JsonRpc::parse(message) {
         Ok(value @ JsonRpc::Request(_)) => {
-            let (tx, rx) = crossbeam_channel::unbounded();
+            let (tx, rx) = crossbeam_channel::bounded(1);
             let id = value.get_id().unwrap();
             let rpc = PluginServerRpc::HostRequest {
                 id: id.clone(),
@@ -829,6 +832,8 @@ impl PluginHostHandler {
                     .output()?;
                 Ok(serde_json::to_value(ExecuteProcessResult {
                     success: output.status.success(),
+                    stdout: Some(output.stdout),
+                    stderr: Some(output.stderr),
                 })?)
             }
             _ => Err(anyhow!("request not supported")),
